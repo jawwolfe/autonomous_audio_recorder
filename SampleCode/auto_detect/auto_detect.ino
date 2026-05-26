@@ -11,10 +11,12 @@ const int recordingTimeLimit = 30000; // 30 seconds limit
 const float soundThresholdMultiplier = 1.5; // Starts recording if 1.5x louder than quiet
 const int silenceTimeout = 5000; // Stop if silent for 5 seconds
 
-float baselineNoise = 0.0;
+unsigned long recordingStartTime = 0;
+unsigned long lastSoundTime = 0;
 bool isRecording = false;
 unsigned long recordingStartTime = 0;
 unsigned long lastSoundTime = 0;
+
 
 void setup() {
   Serial.begin(115200);
