@@ -25,7 +25,7 @@
 
 // Recording constraints
 const int recordingTimeLimit = 30000; // 30 seconds limit
-const float soundThresholdMultiplier = 1.2; // Starts recording if 1.5x louder than quiet
+const float soundThresholdMultiplier = 1.3; // Starts recording if 1.5x louder than quiet
 const int silenceTimeout = 5000; // Stop if silent for 5 seconds
 
 File file;
@@ -137,28 +137,14 @@ void setup() {
 }
 
 void loop() {  
-  float currentVolume = readMicrophoneVolume();\
-  Serial.println("current vol:");
-  Serial.println(currentVolume);
-  delay(1900);
-  Serial.println("baseline x threshold:");
-  Serial.println(baselineNoise * soundThresholdMultiplier);
-  delay(1900);
-  //if (digitalRead(BUTTON_PIN) == LOW) {
-  //  delay(200); 
-  //  if (isRecording) {
-  //    stopRecording();
-  //  } else {
-  //    startRecording();
-  //  }
-  //  while (digitalRead(BUTTON_PIN) == LOW)
-  //    ; 
- // }
+  float currentVolume = readMicrophoneVolume();
  
   if (!isRecording) {
     if (currentVolume > (baselineNoise * soundThresholdMultiplier)) {
       Serial.println("Start Recroding!");
       startRecording();
+      recordingStartTime = millis();
+      lastSoundTime = millis();
     }
 
     
@@ -168,14 +154,17 @@ void loop() {
     // We are recording, check stop conditions
     unsigned long elapsed = millis() - recordingStartTime;
     float silenceDuration = millis() - lastSoundTime;
-
     // Check time limit OR silence limit
     if (elapsed >= recordingTimeLimit || silenceDuration >= silenceTimeout) {
       stopRecording();
     } else {
-        Serial.println("appending auiod");
-      appendAudioToSD(); // Read from I2S and write to WAV
+        // Read from I2S and write to WAV
+
+        appendAudioToSD();
+        digitalWrite(LED_PIN, HIGH);
+
       if (currentVolume > (baselineNoise * soundThresholdMultiplier)) {
+        Serial.println("reset last sound now");
         lastSoundTime = millis(); // Reset silence timer if sound continues
       }
     }
@@ -215,7 +204,7 @@ void startRecording() {
   }
   sprintf(filename, "/rec%d.wav", fileIndex);
 
-  Serial.print("Record is Start: ");
+  Serial.print("Recording has started: ");
   Serial.println(filename);
 
   file = SD.open(filename, FILE_WRITE);
@@ -230,15 +219,13 @@ void startRecording() {
 }
 
 void stopRecording() {
-  Serial.println("Recors is Stopped...");
+  Serial.println("Recording is Stopped...");
   isRecording = false;
- 
   unsigned long fileSize = file.size() - WAVE_HEADER_SIZE;
   file.seek(0);
   writeWavHeader(file, SAMPLE_RATE, 16, 1, fileSize);
   file.close();
-
-  Serial.println("Record is Complete!");
+  Serial.println("Recording is Complete!");
   digitalWrite(LED_PIN, LOW); 
 }
 
@@ -250,7 +237,7 @@ void appendAudioToSD() {
     size_t bytesRead;
     int32_t i2sBuffer[256]; 
  
-    i2s_read(I2S_NUM, (void *)i2sBuffer, sizeof(i2sBuffer), &bytesRead, portMAX_DELAY);
+    i2s_read(I2S_NUM_0, (void *)i2sBuffer, sizeof(i2sBuffer), &bytesRead, portMAX_DELAY);
 
     int16_t samples16[256];
     int samplesCount = bytesRead / 4;
