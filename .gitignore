@@ -1,0 +1,21 @@
+# Numerous always-ignore extensions
+*.diff
+*.err
+*.orig
+*.log
+*.rej
+*.swo
+*.swp
+*.vi
+*.htaccess
+*.idea
+*.csv
+*.xlsx
+*.json
+
+
+# Vagrant local state directory.
+.vagrant
+libraries
+
+

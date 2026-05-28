@@ -3,6 +3,8 @@
 #include <SPI.h>
 #include <driver/i2s.h>
 #include <FS.h>
+#include <Wire.h>
+#include <RTClib.h>
 
 //#define GAIN_FACTOR 2.5
 
@@ -17,6 +19,10 @@
 
 //#define BUTTON_PIN 8
 #define LED_PIN 3
+
+//clock RTC
+#define I2C_SDA 8
+#define I2C_SCL 9
 
 #define SAMPLE_RATE 48000  // DVD quality
 #define I2S_NUM I2S_NUM_0
@@ -35,7 +41,8 @@ unsigned long recordingStartTime = 0;
 unsigned long lastSoundTime = 0;
 unsigned long baselineNoise = 0;
 int fileIndex = 1;
-char filename[32];
+char filename[64];
+RTC_DS3231 rtc;
  
 const i2s_config_t i2s_config = {
   .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
@@ -116,6 +123,18 @@ void setup() {
   //pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+
+  bool i2c_ok = Wire.begin(I2C_SDA, I2C_SCL);
+  if (!i2c_ok) {
+    Serial.println("Error: Failed to initialize I2C bus.");
+    while (1);
+  }
+
+  if (!rtc.begin()) {
+    Serial.println("Error: Could not find DS3231 module. Check your wiring!");
+    while (1);
+  }
+  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
 
   SPI.begin(SD_CLK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
 
@@ -198,8 +217,19 @@ float readMicrophoneVolume() {
 void startRecording() { 
   while (SD.exists("/rec" + String(fileIndex) + ".wav")) {
     fileIndex++;
+    snprintf(filename, sizeof(filename), "/rec%d.wav", fileIndex);
   }
-  sprintf(filename, "/rec%d.wav", fileIndex);
+
+  // Fetch the current date and time from the DS3231 (Now rtc works perfectly!)
+  DateTime now = rtc.now();
+
+  // Format: /rec1_2026-05-27.wav (ISO date format)
+  // Note: Do not use ":" inside filenames on FAT32 SD cards, as it is an invalid character!
+  snprintf(filename, sizeof(filename), "/rec%d_%04d-%02d-%02d.wav", 
+          fileIndex, 
+          now.year(), 
+          now.month(), 
+          now.day());
 
   Serial.print("Recording has started: ");
   Serial.println(filename);
