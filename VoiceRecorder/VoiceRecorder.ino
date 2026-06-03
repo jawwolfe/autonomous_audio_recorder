@@ -32,6 +32,17 @@
 #define SERVICE_UUID        "fdcff45e-438b-4a62-acf6-dbd852aae4b1"
 #define CHARACTERISTIC_UUID "cf28c230-d88e-4e6e-8a2e-0efc4d8ec072"
 
+// Define your two daily wake-up windows (in 24-hour format)
+const int START_1_HR = 8;   // Window 1 Start: 08:30
+const int START_1_MIN = 30;
+const int STOP_1_HR = 9;    // Window 1 End: 09:30
+const int STOP_1_MIN = 30;
+
+const int START_2_HR = 17;  // Window 2 Start: 17:00
+const int START_2_MIN = 0;
+const int STOP_2_HR = 22;   // Window 2 End: 18:00
+const int STOP_2_MIN = 0;
+
 // Recording constraints
 const int recordingTimeLimit = 30000; // 30 seconds limit
 const float soundThresholdMultiplier = 1.3; // Starts recording if 1.5x louder than quiet
@@ -122,11 +133,13 @@ void writeWavHeader(File &file, int sampleRate, int bitsPerSample, int channels,
 
 void setup() {
   Serial.begin(115200);
+  delay(1000); // Give serial time to initialize
   pinMode(LED_PIN, OUTPUT);
   pinMode(LED_PIN_2, OUTPUT);
   digitalWrite(LED_PIN, LOW);
   digitalWrite(LED_PIN_2, LOW);
-
+  // Get current time from the DS3231 module
+  DateTime now = rtc.now();
   Serial.println("Starting BLE work!");
 
   // 1. Initialize the BLE device and give it a name
@@ -187,25 +200,68 @@ void setup() {
     Serial.println("Error: Could not find DS3231 module. Check your wiring!");
     while (1);
   }
-  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-
-  SPI.begin(SD_CLK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-
-  if (!SD.begin(SD_CS_PIN)) {
-    Serial.println("SD Card not Initialize!");
-    while (1) {
-      digitalWrite(LED_PIN, HIGH);
-      delay(500);
-      digitalWrite(LED_PIN, LOW);
-      delay(500);
-    }
+  if (rtc.lostPower()) {
+    Serial.println("RTC lost power, letting's set the time!");
+    // This sets the RTC to the date & time this sketch was compiled
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
-  Serial.println("SD Card Ready.");
-  i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_NUM, &pin_config);
-  i2s_zero_dma_buffer(I2S_NUM);
-  calibrateNoiseFloor();
-  Serial.println("System is Ready. Waiting for sound trigger");
+
+  // Convert everything to minutes since midnight for easy comparison
+  int currentMinutes = (now.hour() * 60) + now.minute();
+  int start1 = (START_1_HR * 60) + START_1_MIN;
+  int stop1  = (STOP_1_HR * 60) + STOP_1_MIN;
+  int start2 = (START_2_HR * 60) + START_2_MIN;
+  int stop2  = (STOP_2_HR * 60) + STOP_2_MIN;
+
+  // Check if we are currently INSIDE either of the two active windows
+  bool inWindow1 = (currentMinutes >= start1 && currentMinutes < stop1);
+  bool inWindow2 = (currentMinutes >= start2 && currentMinutes < stop2);
+
+  if (inWindow1 || inWindow2) {
+    // We are supposed to be awake! Proceed to void loop()
+    Serial.println("Inside an active window. Running loop()...");
+    SPI.begin(SD_CLK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+    if (!SD.begin(SD_CS_PIN)) {
+      Serial.println("SD Card not Initialize!");
+      while (1) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(500);
+        digitalWrite(LED_PIN, LOW);
+        delay(500);
+      }
+    }
+    Serial.println("SD Card Ready.");
+    i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+    i2s_set_pin(I2S_NUM, &pin_config);
+    i2s_zero_dma_buffer(I2S_NUM);
+    calibrateNoiseFloor();
+    Serial.println("System is Ready. Waiting for sound trigger");
+    } else {
+      // We are outside the windows. Calculate sleep duration and go to sleep immediately.
+      int minutesToSleep = 0;
+
+      if (currentMinutes < start1) {
+        // It's early morning, sleep until Window 1
+        minutesToSleep = start1 - currentMinutes;
+      } else if (currentMinutes < start2) {
+        // We are between Window 1 and Window 2, sleep until Window 2
+        minutesToSleep = start2 - currentMinutes;
+      } else {
+        // It's late night, sleep until Window 1 of the NEXT day
+        minutesToSleep = (1440 - currentMinutes) + start1;
+      }
+
+      // Safeguard seconds adjustment: subtract current seconds so we wake up exactly on the minute mark
+      long secondsToSleep = (minutesToSleep * 60) - now.second();
+      if (secondsToSleep <= 0) secondsToSleep = 1; // Prevent negative/zero sleep
+
+      Serial.printf("Outside active windows. Sleeping for %ld seconds...\n", secondsToSleep);
+      Serial.flush();
+
+      // Configure deep sleep timer (expects microseconds)
+      esp_sleep_enable_timer_wakeup((uint64_t)secondsToSleep * 1000000ULL);
+      esp_deep_sleep_start();
+  }
 }
 
 void loop() {  
@@ -237,6 +293,24 @@ void loop() {
       }
     }
   }
+
+  // Dynamically check if our active window has just expired
+  //DateTime now = rtc.now();
+  int currentMinutes = (now.hour() * 60) + now.minute();
+  int start1 = (START_1_HR * 60) + START_1_MIN;
+  int stop1  = (STOP_1_HR * 60) + STOP_1_MIN;
+  int start2 = (START_2_HR * 60) + START_2_MIN;
+  int stop2  = (STOP_2_HR * 60) + STOP_2_MIN;
+
+  bool inWindow1 = (currentMinutes >= start1 && currentMinutes < stop1);
+  bool inWindow2 = (currentMinutes >= start2 && currentMinutes < stop2);
+
+  // If we drop out of BOTH windows, force a restart so setup() can handle the deep sleep math
+  if (!inWindow1 && !inWindow2) {
+    Serial.println("Active window expired! Going to sleep.");
+    Serial.flush();
+    esp_restart(); 
+
 }
 
 void calibrateNoiseFloor() {
