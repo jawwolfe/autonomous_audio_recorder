@@ -41,12 +41,12 @@ const int eepromAddress = 0;
 
 
 // Define your two daily wake-up windows (in 24-hour format)
-const int START_1_HR = 8;   // Window 1 Start: 08:30
+const int START_1_HR = 2;   // Window 1 Start: 08:30
 const int START_1_MIN = 30;
-const int STOP_1_HR = 9;    // Window 1 End: 09:30
-const int STOP_1_MIN = 30;
+const int STOP_1_HR = 11;    // Window 1 End: 09:30
+const int STOP_1_MIN = 59;
 
-const int START_2_HR = 16;  // Window 2 Start: 17:00
+const int START_2_HR = 12;  // Window 2 Start: 17:00
 const int START_2_MIN = 0;
 const int STOP_2_HR = 23;   // Window 2 End: 18:00
 const int STOP_2_MIN = 15;
