@@ -71,6 +71,19 @@ const int SD_CLK_PIN = 12; //also know as SCK pin
 unsigned long startDiscError = 0;
 const unsigned long intDiscError = 10000;
 
+// --- GPS GLOBAL DEFAULTS and Variables ---
+const int RXD1 = 16;  // Connect to the TX pin of the GPS!!!! reversed!!
+const int TXD1 = 15;  // Connect to the RX pin of the GPS!!!! reversed!!
+const double DEFAULT_LAT = 0.0;
+const double DEFAULT_LNG = 0.0;
+double globalLat = DEFAULT_LAT;
+double globalLng = DEFAULT_LNG;
+bool hasValidGpsFix = false;
+unsigned long GPSWiringLastDataTime = 0;
+unsigned long lastGPSHourlyUpdate = 0;
+const unsigned long GPS_ONE_HOUR_MS = 3600000;      // 60 mins * 60 secs * 1000 ms
+const unsigned long GPS_SETUP_TIMEOUT_MS = 15000;   // 15 seconds max wait in setup
+
 // --- LED PIN DEFINITIONS ---
 const int LED_PIN = 3; // blue led for recording or listening
 const int LED_PIN_2 = 17; // yellow led for SD disc status full or not ready
@@ -95,8 +108,9 @@ const int eepromAddress = 0; // memory address
 
 // -- INSTANTIATE GLOBAL FILE NAME AND RTC --
 File file;
-char filename[64];
+char filename[90];
 RTC_DS3231 rtc;
+TinyGPSPlus gps;
 
 void setup() {
   Serial.begin(115200);
@@ -120,6 +134,12 @@ void setup() {
     // This sets the RTC to the date & time this sketch was compiled
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
+
+    // Initialize Serial1
+  Serial1.begin(9600, SERIAL_8N1, RXD1, TXD1);
+  Serial.println("ESP32-S3 GPS Test Initialized.");
+    unsigned long setupStart = millis();
+
   // Get current time from the DS3231 module
   DateTime now = rtc.now();
 
@@ -143,10 +163,10 @@ void setup() {
     Serial.println("Failed to initialize EEPROM");
     return;
   }
-
+  
   //one time code to enter the unit id into the EEPROM as a config
   //char charBuffer[MAX_STRING_LENGTH];
-  //String myString = "esp32_aww_unt01";  
+  //String myString = "esp32_aw_01";  
   //writeStringToEEPROM(eepromAddress, myString);
   //Serial.println("String saved successfully.");
   //String retrievedString = readStringFromEEPROM(eepromAddress);
@@ -155,10 +175,48 @@ void setup() {
 
   if (inWindow1 || inWindow2) {
     // We are supposed to be awake! Proceed to void loop()
+
+
+    // GET initial GPS coordinates
+    while (!hasValidGpsFix && (millis() - setupStart < GPS_SETUP_TIMEOUT_MS)) {
+      while (Serial1.available() > 0) {
+        char c = Serial1.read();
+        if (gps.encode(c)) {
+          if (gps.location.isValid()) {
+            globalLat = gps.location.lat();
+            globalLng = gps.location.lng();
+            hasValidGpsFix = true;
+            
+            Serial.println("\n--- Setup GPS Fix Acquired! ---");
+            Serial.print("Initial Coordinates: ");
+            Serial.print(globalLat, 6);
+            Serial.print(", ");
+            Serial.println(globalLng, 6);
+            break; 
+          }
+        }
+      }
+    delay(1); // Keep the ESP32-S3 watchdog happy
+    }
+    // If the loop finished but we never got a valid fix, use defaults
+    if (!hasValidGpsFix) {
+      globalLat = DEFAULT_LAT;
+      globalLng = DEFAULT_LNG;
+      Serial.println("\n--- Setup GPS Timeout ---");
+      Serial.println("Could not get a satellite lock in time.");
+    }
+    // Synchronize our timers right as setup finishes
+    GPSWiringLastDataTime = millis();
+    lastGPSHourlyUpdate = millis();
+    char latStr[16];
+    char lngStr[16];
+    dtostrf(globalLat, 1, 6, latStr);
+    dtostrf(globalLng, 1, 6, lngStr);
+    String coordinatesString = String(latStr) + "," + lngStr;
     Serial.println("Inside active window starting BLE work!");
     String retrievedString = readStringFromEEPROM(eepromAddress);
     if (retrievedString.length() == 0) {
-      retrievedString = "esp32_aww_undef";
+      retrievedString = "esp32_aw_xx";
     }
     BLEDevice::init(retrievedString);
     BLEServer *pServer = BLEDevice::createServer();
@@ -168,7 +226,7 @@ void setup() {
                                           BLECharacteristic::PROPERTY_READ |
                                           BLECharacteristic::PROPERTY_WRITE
                                         );
-    String initCharacteristic = "Hello from: " + retrievedString + "!";
+    String initCharacteristic = "Coordinates: " + coordinatesString;
     pCharacteristic->setValue(initCharacteristic);
         pService->start();
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -210,6 +268,8 @@ void setup() {
     calibrateNoiseFloor();
     Serial.println("System is Ready. Waiting for sound trigger");
 
+
+
     } else {
       // We are outside the windows. Calculate sleep duration and go to sleep immediately.
       int minutesToSleep = 0;
@@ -239,6 +299,31 @@ void setup() {
 }
 
 void loop() {  
+
+  // GPS code
+  bool dataReceived = false;
+  // Keep feeding TinyGPS++ constantly in the background
+  while (Serial1.available() > 0) {
+    char c = Serial1.read();
+    dataReceived = true;
+    gps.encode(c);
+  }
+  if (dataReceived) {
+    GPSWiringLastDataTime = millis(); // Reset wiring timeout tracker
+  }
+
+  // --- HOURLY UPDATE LOGIC (Non-blocking) ---
+  if (millis() - lastGPSHourlyUpdate >= GPS_ONE_HOUR_MS) {
+    updateHourlyCoordinates();
+    lastGPSHourlyUpdate = millis(); // Reset the 1-hour timer
+  }
+
+  // Wiring check: If 5 seconds pass without ANY raw data over the serial line
+  if (millis() - GPSWiringLastDataTime > 5000) {
+    Serial.println("Error: No raw GPS data detected. Check your wiring or pins!");
+    GPSWiringLastDataTime = millis(); 
+  }
+
   // 1. If NOT recording, we sample the microphone to look for the trigger sound
   if (!isRecording) {
     //put the slow blink of blue LED_PIN using millis here
@@ -335,8 +420,9 @@ void startRecording() {
   DateTime now = rtc.now();
   char deviceName[16];
   strlcpy(deviceName, readStringFromEEPROM(eepromAddress).c_str(), sizeof(deviceName));
-  snprintf(filename, sizeof(filename), "/%s_%04d-%02d-%02d_%02d_%02d_%02d.wav", 
-          deviceName, now.year(), now.month(), now.day(), 
+  snprintf(filename, sizeof(filename), "/%s_%.6f_%.6f_%04d-%02d-%02d_%02d_%02d_%02d.wav", 
+          deviceName, globalLat, globalLng,         
+          now.year(), now.month(), now.day(), 
           now.hour(), now.minute(), now.second());
 
   Serial.print("Recording has started: ");
@@ -507,4 +593,22 @@ void writeWavHeader(File &file, int sampleRate, int bitsPerSample, int channels,
   header[43] = (byte)((dataSize >> 24) & 0xFF); 
 
   file.write(header, WAVE_HEADER_SIZE);
+}
+
+void updateHourlyCoordinates() {
+  Serial.println("\n--- Triggering Hourly GPS Update ---");
+  
+  if (gps.location.isValid()) {
+    globalLat = gps.location.lat();
+    globalLng = gps.location.lng();
+    hasValidGpsFix = true;
+
+    Serial.print("Global Coordinates Updated: ");
+    Serial.print(globalLat, 6);
+    Serial.print(", ");
+    Serial.println(globalLng, 6);
+  } else {
+    hasValidGpsFix = false;
+    Serial.println("Hourly update failed: No valid GPS fix at this moment.");
+  }
 }
