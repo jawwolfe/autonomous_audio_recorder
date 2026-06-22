@@ -8,7 +8,7 @@ const double DEFAULT_LNG = 0.0;
 double globalLat = DEFAULT_LAT;
 double globalLng = DEFAULT_LNG;
 bool hasValidGpsFix = false;
-unsigned long wiringLastDataTime = 0;
+unsigned long GPSWiringLastDataTime = 0;
 unsigned long lastGPSHourlyUpdate = 0;
 const unsigned long GPS_ONE_HOUR_MS = 3600000;      // 60 mins * 60 secs * 1000 ms
 const unsigned long GPS_SETUP_TIMEOUT_MS = 15000;   // 15 seconds max wait in setup
@@ -54,7 +54,7 @@ void setup() {
   }
 
   // Synchronize our timers right as setup finishes
-  wiringLastDataTime = millis();
+  GPSWiringLastDataTime = millis();
   lastGPSHourlyUpdate = millis();
 }
 
@@ -70,7 +70,7 @@ void loop() {
   }
 
   if (dataReceived) {
-    wiringLastDataTime = millis(); // Reset wiring timeout tracker
+    GPSWiringLastDataTime = millis(); // Reset wiring timeout tracker
   }
 
   // --- HOURLY UPDATE LOGIC (Non-blocking) ---
@@ -80,9 +80,9 @@ void loop() {
   }
 
   // Wiring check: If 5 seconds pass without ANY raw data over the serial line
-  if (millis() - wiringLastDataTime > 5000) {
+  if (millis() - GPSWiringLastDataTime > 5000) {
     Serial.println("Error: No raw GPS data detected. Check your wiring or pins!");
-    wiringLastDataTime = millis(); 
+    GPSWiringLastDataTime = millis(); 
   }
 
 }
