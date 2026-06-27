@@ -83,14 +83,16 @@ unsigned long GPSWiringLastDataTime = 0;
 unsigned long lastGPSHourlyUpdate = 0;
 const unsigned long GPS_ONE_HOUR_MS = 3600000;      // 60 mins * 60 secs * 1000 ms
 const unsigned long GPS_SETUP_TIMEOUT_MS = 15000;   // 15 seconds max wait in setup
+int GPS_POWER_PIN  = 1;
+int GPS_ON = LOW;
+int GPS_OFF = HIGH;
 
 // --- LED PIN DEFINITIONS ---
-const int LED_PIN = 3; // blue led for recording or listening
+const int LED_PIN = 14; // blue led for recording or listening
 const int LED_PIN_2 = 17; // yellow led for SD disc status full or not ready
 const int LED_PIN_3 = 7; // red led for battery voltage checks
 // -- used in startup disk check --
 int ledState = LOW; 
-const int ledPin = 3;
 // -- used in recording long blink when sampling--
 const long int_samp_blnk = 1000;
 unsigned long prevMillisBlnk = 0;   
@@ -120,6 +122,9 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
   digitalWrite(LED_PIN_2, LOW);
 
+  pinMode(GPS_POWER_PIN, OUTPUT);
+  digitalWrite(GPS_POWER_PIN, GPS_OFF);
+
   bool i2c_ok = Wire.begin(RTC_SDA_PIN, RTC_SCL_PIN);
   if (!i2c_ok) {
     Serial.println("Error: Failed to initialize I2C bus.");
@@ -138,10 +143,13 @@ void setup() {
     // Initialize Serial1
   Serial1.begin(9600, SERIAL_8N1, RXD1, TXD1);
   Serial.println("ESP32-S3 GPS Test Initialized.");
-    unsigned long setupStart = millis();
+  unsigned long setupStart = millis();
 
   // Get current time from the DS3231 module
   DateTime now = rtc.now();
+
+  float batteryLevel = map(analogRead(BAT_PIN), 0.0f, 4095.0f, 0, 100);
+  Serial.println(batteryLevel);
 
   // Convert everything to minutes since midnight for easy comparison
   int currentMinutes = (now.hour() * 60) + now.minute();
@@ -163,6 +171,7 @@ void setup() {
     Serial.println("Failed to initialize EEPROM");
     return;
   }
+
   
   //one time code to enter the unit id into the EEPROM as a config
   //char charBuffer[MAX_STRING_LENGTH];
@@ -175,7 +184,7 @@ void setup() {
 
   if (inWindow1 || inWindow2) {
     // We are supposed to be awake! Proceed to void loop()
-
+    digitalWrite(GPS_POWER_PIN, GPS_ON);
 
     // GET initial GPS coordinates
     while (!hasValidGpsFix && (millis() - setupStart < GPS_SETUP_TIMEOUT_MS)) {
@@ -268,10 +277,9 @@ void setup() {
     calibrateNoiseFloor();
     Serial.println("System is Ready. Waiting for sound trigger");
 
-
-
     } else {
       // We are outside the windows. Calculate sleep duration and go to sleep immediately.
+      digitalWrite(GPS_POWER_PIN, GPS_OFF);
       int minutesToSleep = 0;
 
       if (currentMinutes < start1) {
@@ -339,7 +347,7 @@ void loop() {
         ledState = LOW;
       }
       // Update the physical LED pin with the new state
-      digitalWrite(ledPin, ledState);
+      digitalWrite(LED_PIN, ledState);
     }
 
     float currentVolume = readMicrophoneVolume();
@@ -383,6 +391,7 @@ void loop() {
   // If we drop out of BOTH windows, force a restart so setup() can handle the deep sleep math
   if (!inWindow1 && !inWindow2) {
     Serial.println("Active window expired! Going to sleep.");
+    digitalWrite(GPS_POWER_PIN, GPS_OFF);
     Serial.flush();
     esp_restart(); 
   }
