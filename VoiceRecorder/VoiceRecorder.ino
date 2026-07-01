@@ -79,9 +79,6 @@ const double DEFAULT_LNG = 0.0;
 double globalLat = DEFAULT_LAT;
 double globalLng = DEFAULT_LNG;
 bool hasValidGpsFix = false;
-unsigned long GPSWiringLastDataTime = 0;
-unsigned long lastGPSHourlyUpdate = 0;
-const unsigned long GPS_ONE_HOUR_MS = 3600000;      // 60 mins * 60 secs * 1000 ms
 const unsigned long GPS_SETUP_TIMEOUT_MS = 1200000;   // 15 seconds max wait in setup
 const int MOSFET_GATE_PIN  = 1;
 
@@ -211,8 +208,6 @@ void setup() {
     digitalWrite(MOSFET_GATE_PIN, HIGH);
 
     // Synchronize our timers right as setup finishes
-    GPSWiringLastDataTime = millis();
-    lastGPSHourlyUpdate = millis();
     char latStr[16];
     char lngStr[16];
     dtostrf(globalLat, 1, 6, latStr);
@@ -303,12 +298,6 @@ void setup() {
 
 void loop() {  
 
-  // --- HOURLY UPDATE LOGIC (Non-blocking window check) ---
-  if (millis() - lastGPSHourlyUpdate >= GPS_ONE_HOUR_MS) {
-    updateHourlyCoordinates();
-    lastGPSHourlyUpdate = millis(); // Reset the 1-hour timer
-  }
-
   // Check if battery is low
   if (batteryLevel < LOW_BATTERY_THRESHOLD) {
     // Non-blocking flash logic
@@ -387,48 +376,6 @@ void loop() {
     Serial.flush();
     esp_restart(); 
   }
-}
-
-void updateHourlyCoordinates() {
-  Serial.println("\n--- Triggering Hourly GPS Update ---");
-  Serial.println("Powering ON GPS via MOSFET...");
-  digitalWrite(MOSFET_GATE_PIN, LOW); // Turn ON GPS
-
-  // Clear older data inside the TinyGPS parser object
-  gps = TinyGPSPlus(); 
-
-  unsigned long updateStart = millis();
-  bool localFixAcquired = false;
-
-  // Actively pool and decode Serial1 data for the duration of the timeout
-  while (millis() - updateStart < GPS_SETUP_TIMEOUT_MS) {
-    while (Serial1.available() > 0) {
-      char c = Serial1.read();
-      if (gps.encode(c)) {
-        if (gps.location.isValid()) {
-          globalLat = gps.location.lat();
-          globalLng = gps.location.lng();
-          hasValidGpsFix = true;
-          localFixAcquired = true;
-          break;
-        }
-      }
-    }
-    if (localFixAcquired) break;
-    delay(1);
-  }
-
-  if (localFixAcquired) {
-    Serial.print("Hourly Global Coordinates Updated: ");
-    Serial.print(globalLat, 6);
-    Serial.print(", ");
-    Serial.println(globalLng, 6);
-  } else {
-    Serial.println("Hourly update warning: Timed out waiting for valid satellite data. Retaining last coordinates.");
-  }
-
-  // Turn OFF GPS immediately after trying to obtain an update
-  digitalWrite(MOSFET_GATE_PIN, HIGH);
 }
 
 void calibrateNoiseFloor() {
