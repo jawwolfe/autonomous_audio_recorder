@@ -111,8 +111,14 @@ bool ledStateBattery = false;
 const int MAX_STRING_LENGTH = 16; 
 const int eepromAddress = 0; // memory address
 
+// --- FILE LOGGING ---
+unsigned long lastRotationTime = 0;
+const unsigned long ONE_HOUR_MS = 3600000; // 1 hour in milliseconds
+String currentFileName; // Determined dynamically on boot/rotation
+
 // -- INSTANTIATE GLOBAL FILE NAME AND RTC --
 File file;
+File file1;
 char filename[92];
 RTC_DS3231 rtc;
 TinyGPSPlus gps;
@@ -137,6 +143,7 @@ void setLocalTimezone(float longitude, int year, int month, int day) {
     tzset();
     timezoneKnown = true;
     Serial.printf("Timezone configured to: %s\n", tzString);
+
 }
 
 void syncSystemTimeWithGPS() {
@@ -147,32 +154,70 @@ void syncSystemTimeWithGPS() {
     t.tm_hour = gps.time.hour();
     t.tm_min = gps.time.minute();
     t.tm_sec = gps.time.second();
-    t.tm_isdst = -1; // Let the library determine DST from the TZ string
-    uint16_t year   = gps.date.year();
-    uint8_t month   = gps.date.month();
-    uint8_t day     = gps.date.day();
-    uint8_t hour    = gps.time.hour();
-    uint8_t minute  = gps.time.minute();
-    uint8_t second  = gps.time.second();
+    t.tm_isdst = 0; // GPS is pure UTC, no DST
+
+    // Universal way to convert UTC struct tm to Unix epoch without timegm()
+    // We temporarily clear TZ to "UTC", run mktime, then let tzset() restore it later.
+    char *old_tz = getenv("TZ");
+    std::string saved_tz = old_tz ? old_tz : "";
     
-    time_t t_of_day = mktime(&t);
+    setenv("TZ", "UTC0", 1);
+    tzset();
+    time_t utc_epoch = mktime(&t);
+
+    // Restore your original local timezone configuration
+    if (!saved_tz.empty()) {
+        setenv("TZ", saved_tz.c_str(), 1);
+    } else {
+        unsetenv("TZ");
+    }
+    tzset();
     
-    // Apply UTC to system time
-    struct timeval tv = { .tv_sec = t_of_day, .tv_usec = 0 };
+    // Apply the pure UTC epoch to the internal ESP32 system time
+    struct timeval tv = { .tv_sec = utc_epoch, .tv_usec = 0 };
     settimeofday(&tv, NULL);
-    rtc.adjust(DateTime(year, month, day, hour, minute, second));
+
+    // Convert that exact same epoch timestamp into LOCAL time components
+    // This utilizes your restored local "TZ" environment variable automatically!
+    struct tm *local_tm = localtime(&utc_epoch);
+
+    // Update the DS3231 RTC with the adjusted LOCAL time
+    rtc.adjust(DateTime(
+        local_tm->tm_year + 1900, 
+        local_tm->tm_mon + 1, 
+        local_tm->tm_mday, 
+        local_tm->tm_hour, 
+        local_tm->tm_min, 
+        local_tm->tm_sec
+    ));
+    
+    Serial.println("System clock (UTC) and RTC (Local) successfully synced!");
+    logMessage("System clock (UTC) and RTC (Local) successfully synced! ");
 }
 
 void printLocalTime() {
     struct tm timeinfo;
     if(!getLocalTime(&timeinfo)){
         Serial.println("Failed to obtain time");
+        logMessage("Failed to obtain time ");
         return;
     }
     Serial.println(&timeinfo, "Local Time: %A, %B %d %Y %H:%M:%S");
+    //logMessage("Failed to initialize EEPROM");
 }
 
-
+void logMessage(const String &message) {
+  // Open file in Append mode. If it doesn't exist, it creates it automatically.
+  file1 = SD.open(currentFileName, FILE_APPEND);
+    if (file1) {
+    file1.println(message);
+    // Explicitly closing updates the file allocation table (FAT) size immediately
+    file1.close(); 
+  } else {
+    Serial.println("CRITICAL: Failed to open file for appending debug data!");
+  }
+}
+  
 void setup() {
   Serial.begin(115200);
   delay(1000); // Give serial time to initialize
@@ -182,15 +227,10 @@ void setup() {
   digitalWrite(LED_PIN_3, LOW);
   digitalWrite(LED_PIN, LOW);
   digitalWrite(LED_PIN_2, LOW);
-
   pinMode(MOSFET_GATE_PIN, OUTPUT);
   digitalWrite(MOSFET_GATE_PIN, LOW);
 
-  bool i2c_ok = Wire.begin(RTC_SDA_PIN, RTC_SCL_PIN);
-  if (!i2c_ok) {
-    Serial.println("Error: Failed to initialize I2C bus.");
-    while (1);
-  }
+  // -- Initilize RTC and SD
   if (!rtc.begin()) {
     Serial.println("Error: Could not find DS3231 module. Check your wiring!");
     while (1);
@@ -200,14 +240,36 @@ void setup() {
     // This sets the RTC to the date & time this sketch was compiled
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
   }
-
-  // Initialize Serial1
-  Serial1.begin(9600, SERIAL_8N1, RXD1, TXD1);
-  unsigned long setupStart = millis();
+  SPI.begin(SD_CLK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("SD Card not Initialize!");
+    while (1) {
+      digitalWrite(LED_PIN_2, HIGH);
+      delay(500);
+      digitalWrite(LED_PIN_2, LOW);
+      delay(500);
+    }
+  }
 
   // Get current time from the DS3231 module
   DateTime now = rtc.now();
+  // Log file work establish filename format with minutes from RTC for initial boot
+  char bootLogName[40];
+  snprintf(bootLogName, sizeof(bootLogName), "/debug_%04d%02d%02d_%02d%02d.txt", 
+           now.year(), now.month(), now.day(), now.hour(), now.minute());
+  currentFileName = String(bootLogName);
+  lastRotationTime = millis();
 
+  // -- Initialize I2C  mic
+  bool i2c_ok = Wire.begin(RTC_SDA_PIN, RTC_SCL_PIN);
+  if (!i2c_ok) {
+    Serial.println("Error: Failed to initialize I2C bus.");
+    logMessage("Error: Failed to initialize I2C bus. ");
+    while (1);
+  }
+  // Initialize Serial1
+  Serial1.begin(9600, SERIAL_8N1, RXD1, TXD1);
+  unsigned long setupStart = millis();
   batteryLevel = map(analogRead(BAT_PIN), 0.0f, 4095.0f, 0, 100);
 
   // Convert everything to minutes since midnight for easy comparison
@@ -222,6 +284,7 @@ void setup() {
   bool inWindow2 = (currentMinutes >= start2 && currentMinutes < stop2);
 
   if (!EEPROM.begin(MAX_STRING_LENGTH)) {
+    logMessage("Failed to initialize EEPROM ");
     Serial.println("Failed to initialize EEPROM");
     return;
   }
@@ -239,6 +302,7 @@ void setup() {
     // We are supposed to be awake! Proceed to void loop()
     digitalWrite(MOSFET_GATE_PIN, LOW);
     Serial.println("Waiting 20 min max for GPS coords.");
+    logMessage("Waiting 20 min max for GPS coords. ");
     // GET initial GPS coordinates
     while (!hasValidGpsFix && (millis() - setupStart < GPS_SETUP_TIMEOUT_MS)) {
       while (Serial1.available() > 0) {
@@ -255,10 +319,10 @@ void setup() {
 
             struct tm timeinfo;
             if (getLocalTime(&timeinfo) && timezoneKnown) {
-                Serial.println("Woke up from deep sleep. RTC time is valid.");
                 printLocalTime();
             } else {
                 Serial.println("Cold boot or invalid time. Waiting for GPS fix...");
+                logMessage("Cold boot or invalid time. Waiting for GPS fix... ");
                 // 1. Read from your GY-NEO6MV2 module here until gps.location.isValid() and gps.time.isValid() are true
                 // 2. Once valid:
                  float lon = gps.location.lng();
@@ -279,6 +343,7 @@ void setup() {
       globalLat = DEFAULT_LAT;
       globalLng = DEFAULT_LNG;
       Serial.println("Could not get a satellite lock in time.");
+      logMessage("Could not get a satellite lock in time. ");
     }
     digitalWrite(MOSFET_GATE_PIN, HIGH);
 
@@ -288,7 +353,6 @@ void setup() {
     dtostrf(globalLat, 1, 6, latStr);
     dtostrf(globalLng, 1, 6, lngStr);
     String coordinatesString = String(latStr) + "," + lngStr;
-    Serial.println("Inside active window starting BLE work!");
     String retrievedString = readStringFromEEPROM(eepromAddress);
     if (retrievedString.length() == 0) {
       retrievedString = "esp32_aw_xx";
@@ -326,17 +390,7 @@ void setup() {
       esp_pm_configure(&pm_config);
     #endif
 
-    SPI.begin(SD_CLK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
-    if (!SD.begin(SD_CS_PIN)) {
-      Serial.println("SD Card not Initialize!");
-      while (1) {
-        digitalWrite(LED_PIN_2, HIGH);
-        delay(500);
-        digitalWrite(LED_PIN_2, LOW);
-        delay(500);
-      }
-    }
-     i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+    i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
     i2s_set_pin(I2S_NUM, &pin_config);
     i2s_zero_dma_buffer(I2S_NUM);
     calibrateNoiseFloor();
@@ -363,6 +417,7 @@ void setup() {
       if (secondsToSleep <= 0) secondsToSleep = 1; // Prevent negative/zero sleep
 
       Serial.printf("Outside active windows. Sleeping for %ld seconds...\n", secondsToSleep);
+      //logMessage("Outside active windows. Sleeping for %ld seconds...\n", secondsToSleep);
       Serial.flush();
 
       // Configure deep sleep timer (expects microseconds)
@@ -409,7 +464,6 @@ void loop() {
     float currentVolume = readMicrophoneVolume();
     
     if (currentVolume > (baselineNoise * soundThresholdMultiplier)) {
-      Serial.println("Start Recording!");
       startRecording();
       recordingStartTime = millis();
       lastSoundTime = millis();
@@ -447,6 +501,7 @@ void loop() {
   // If we drop out of BOTH windows, force a restart so setup() can handle the deep sleep math
   if (!inWindow1 && !inWindow2) {
     Serial.println("Active window expired! Going to sleep.");
+    logMessage("Active window expired! Going to sleep. ");
     digitalWrite(MOSFET_GATE_PIN, HIGH);
     Serial.flush();
     esp_restart(); 
@@ -490,10 +545,13 @@ void startRecording() {
           now.hour(), now.minute(), now.second(), globalLat, globalLng);
 
   Serial.print("Recording has started: ");
+  logMessage("Recording has started:  ");
   Serial.println(filename);
+  //logMessage(std::string(filename) + " ");
   file = SD.open(filename, FILE_WRITE);
   if (!file) {
     Serial.println("File is not Open!");
+    logMessage("File is not Open! ");
     //Turn off blue 3 led
     digitalWrite(LED_PIN, LOW);
     //Fast blink the 17 yellow for 10 seconds then return to lisitening
@@ -512,13 +570,13 @@ void startRecording() {
 }
 
 void stopRecording() {
-  Serial.println("Recording is Stopped...");
   isRecording = false;
   unsigned long fileSize = file.size() - WAVE_HEADER_SIZE;
   file.seek(0);
   writeWavHeader(file, SAMPLE_RATE, 16, 1, fileSize);
   file.close();
   Serial.println("Recording is Complete!");
+  logMessage("Recording is Complete! ");
   digitalWrite(LED_PIN, LOW); // Turn LED off when done
 }
 
@@ -550,17 +608,18 @@ bool appendAudioToSD() {
     // If bytes written don't match buffer size, the card is likely full
     if (bytesWritten < 512) {
       Serial.println("CRITICAL ERROR: Write failed!");
-      
-      // Check actual storage capacity to confirm
+      logMessage("CRITICAL ERROR: Write failed! ");
       uint64_t totalBytes = SD.totalBytes();
       uint64_t usedBytes = SD.usedBytes();
       uint64_t freeBytes = totalBytes - usedBytes;
 
       Serial.printf("Storage Status: %llu / %llu bytes used.\n", usedBytes, totalBytes);
-      Serial.printf("Remaining Space: %llu bytes.\n", freeBytes);
-
+      //logMessage("Storage Status: %llu / %llu bytes used.\n", usedBytes, totalBytes);
+      Serial.printf("Remaining Space: %llu bytes.", freeBytes);
+      //logMessage("Remaining Space: %llu bytes.", freeBytes);
       if (freeBytes < 512) {
           Serial.println("Error Cause: Insufficient storage space on SD card.");
+          logMessage("Error Cause: Insufficient storage space on SD card. ");
           // Halt execution or trigger a system alert/LED here
           digitalWrite(LED_PIN, LOW); 
           while (true) { 
@@ -570,6 +629,7 @@ bool appendAudioToSD() {
           } 
       } else {
           Serial.println("Error Cause: Hardware disconnect or file corruption.");
+          logMessage("Error Cause: Hardware disconnect or file corruption. ");
           while (true) { 
             digitalWrite(LED_PIN_2, HIGH);
             delay(1250); 
@@ -659,4 +719,18 @@ void writeWavHeader(File &file, int sampleRate, int bitsPerSample, int channels,
   file.write(header, WAVE_HEADER_SIZE);
 }
 
+void checkLogRotation() {
+  if (millis() - lastRotationTime >= ONE_HOUR_MS) {
+    lastRotationTime = millis();
 
+    DateTime now = rtc.now();
+    char rotationBuffer[40];
+    snprintf(rotationBuffer, sizeof(rotationBuffer), "/debug_%04d%02d%02d_%02d%02d.txt", 
+             now.year(), now.month(), now.day(), now.hour(), now.minute());
+    
+    Serial.print("--- One hour elapsed. Rotating logs to: ");
+    logMessage("--- One hour elapsed. Rotating logs to:  ");
+    Serial.print(currentFileName);
+    logMessage(currentFileName);
+  }
+}
